@@ -1,0 +1,821 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Cloudformation template to create required infrastructure resources for Glue Analytics.
+
+Parameters:
+  AppName:
+    Description: Name of Analytics App in lowercase.
+    Type: String
+    Default: glueanalytics
+  EnvType:
+    Description: Name of Enviornment
+    Type: String
+    Default: dev
+  AppVersion:
+    Description: App or Release Version Number
+    Type: String
+    Default: 1
+  GlueScriptsBucket:
+    Description: Name of Existing S3 bucket to store scripts & logs
+    Type: String
+    Default: analytics-glue-work
+  AnalyticsSQSName:
+    Description: Name of SQS to send event log messages
+    Type: String
+    Default: AnalyticsLogETLEventsQueue.fifo  
+  StateMachineName:  
+    Description: Name of Step Function
+    Type: String
+    Default: Generic-Analytics-Step-Function  
+  NotifyEmail:
+    Description: Email Address
+    Type: String
+    Default: bprajapati@deloitte.com  
+
+Resources:
+
+  GlueAnalyticsRaw:
+    Type: AWS::S3::Bucket
+
+  GlueAnalyticsCurrated:
+    Type: AWS::S3::Bucket
+
+  GlueAnalyticsConfirm:
+    Type: AWS::S3::Bucket
+
+  GlueAnalyticsArchive:
+    Type: AWS::S3::Bucket
+
+  GlueAnalyticsTest:
+    Type: AWS::S3::Bucket
+
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  GlueAnalyticsAppRawDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${AppName}db-raw"
+        Description: !Sub "App: ${AppName}"
+
+  GlueAnalyticsAppCurratedDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${AppName}db-currated"
+        Description: !Sub "App: ${AppName}"
+
+  GlueAnalyticsAppDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "${AppName}db"
+        Description: !Sub "App: ${AppName}"
+
+  GlueAnalyticsCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub "${AppName}crawler-raw"
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueAnalyticsAppRawDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${GlueAnalyticsCurrated}/json"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+
+
+  PersonRawJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: person_raw
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueScriptsBucket}/scripts/person_raw.py"
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+
+  PersonConfJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: person_conf
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueScriptsBucket}/scripts/person_conf.py"
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+
+  AddressRawJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: address_raw
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueScriptsBucket}/scripts/address_raw.py"
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+
+  AddressConfJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: address_conf
+      Role: !GetAtt GlueServiceRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub "s3://${GlueScriptsBucket}/scripts/address_conf.py"
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      ExecutionProperty:
+        MaxConcurrentRuns: 2
+      MaxRetries: 0
+
+
+  AnalyticsJobEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "ANALYTICS_JOB_EVENTS_v1"
+      AttributeDefinitions:
+        - AttributeName: job_name
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: event_name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_name
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5        
+      GlobalSecondaryIndexes:
+        - IndexName: JOB-EVENT-TYPE-index
+          KeySchema:
+            - AttributeName: job_name
+              KeyType: HASH
+            - AttributeName: event_name
+              KeyType: RANGE
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+          Projection:
+            ProjectionType: ALL
+
+  AnalyticsJobEventsCurrentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "ANALYTICS_JOB_EVENTS_CURRENT_v1"
+      AttributeDefinitions:
+        - AttributeName: job_name
+          AttributeType: S
+        - AttributeName: event_name
+          AttributeType: S
+      KeySchema:
+        - AttributeName: job_name
+          KeyType: HASH
+        - AttributeName: event_name
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5     
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE      
+
+  InitGenericETLJobLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/initGenericETLJob
+      Handler: index.lambda_handler
+      ##FunctionName: initGenericETLJob
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          rawBucketName:  !Ref GlueAnalyticsRaw
+          currBucketName: !Ref GlueAnalyticsCurrated
+          confBucketName: !Ref GlueAnalyticsConfirm
+          archiveBucket:  !Ref GlueAnalyticsArchive
+          rawCrawlerDB:   !Ref GlueAnalyticsAppRawDatabase
+          currCrawlerDB:  !Ref GlueAnalyticsAppCurratedDatabase
+          confCrawlerDB:  !Ref GlueAnalyticsAppDatabase
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AmazonAthenaFullAccess
+        - AWSGlueConsoleFullAccess
+        - AWSStepFunctionsFullAccess
+
+  LogETLEventsLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 60
+      MemorySize: 2048
+      CodeUri: lambda/logETLEvents
+      #FunctionName: logETLEvents
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          tableName: !Ref AnalyticsJobEventsCurrentTable
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonDynamoDBFullAccess
+        - AWSStepFunctionsFullAccess
+        - AmazonSQSFullAccess
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt StepFunctionLogETLEventsQueue.Arn
+            BatchSize: 1  
+
+  HandleETLEventsLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/handleETLEvents
+      #FunctionName: handleETLEvents
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          tableName: !Ref AnalyticsJobEventsTable
+          snsTopic: !Ref AnalyticsSNSTopic
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonDynamoDBFullAccess
+        - AWSStepFunctionsFullAccess
+        - AmazonSQSFullAccess
+        - AmazonSNSFullAccess
+      Events:
+        DynamoDBEvent:
+          Type: DynamoDB
+          Properties:
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 1
+            Stream: !GetAtt AnalyticsJobEventsCurrentTable.StreamArn
+
+  InvokeAnalyticsCrawlerLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/invokeGlueCrawler
+      #FunctionName: invokeGlueCrawler
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          crawlerName: !Ref GlueAnalyticsCrawler
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AmazonAthenaFullAccess
+        - AWSGlueConsoleFullAccess
+        - AWSStepFunctionsFullAccess            
+
+  CheckStatusOfAnalyticsCrawlerLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/checkStatusOfCrawler
+      #FunctionName: checkStatusOfCrawler
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          crawlerName: !Ref GlueAnalyticsCrawler
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AmazonAthenaFullAccess
+        - AWSGlueConsoleFullAccess
+        - AWSStepFunctionsFullAccess
+
+
+  InvokeETLJobLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/invokeGlueJob
+      #FunctionName: invokeGlueJob
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          glueETLJob: !Ref PersonRawJob
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AmazonAthenaFullAccess
+        - AWSGlueConsoleFullAccess
+        - AWSStepFunctionsFullAccess
+
+  InvokeStepFunctionLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/invokeStepFunction
+      #FunctionName: invokeStepFunction
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          stateMachine: !Ref AnalyticsStepFunction
+          bucketName: !Ref GlueAnalyticsRaw
+          key: !Sub "csv/person/person.csv"
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AWSStepFunctionsFullAccess
+
+  CsvToJsonLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/csvToJson
+      #FunctionName: csvToJson
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          destinationBucket: !Ref GlueAnalyticsCurrated
+          rejectBucket: !Ref GlueAnalyticsRaw
+          archiveBucket: !Ref GlueAnalyticsArchive
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AWSStepFunctionsFullAccess
+
+  CheckStatusOfETLJobLF:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 600
+      MemorySize: 2048
+      CodeUri: lambda/checkStatusOfETLJob
+      #FunctionName: checkStatusOfETLJob
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      AutoPublishAlias: prod
+      Environment:
+        Variables:
+          jobName: !Ref PersonRawJob
+      Policies:
+        - AWSLambdaExecute
+        - CloudWatchLogsFullAccess
+        - AmazonS3FullAccess
+        - AmazonAthenaFullAccess
+        - AWSGlueConsoleFullAccess
+        - AWSStepFunctionsFullAccess
+
+
+  AnalyticsCrawlerActivity:
+    Type: AWS::StepFunctions::Activity
+    Properties:
+      Name: AnalyticsCrawlerRawActivity
+
+  StepFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 7
+
+  StepFunctionLogETLEventsQueue:
+    Type: AWS::SQS::Queue 
+    Properties:
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      QueueName: !Ref AnalyticsSQSName
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 43200 # 12 hours
+
+
+  AnalyticsStepFunction:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Ref StateMachineName
+      RoleArn: !GetAtt [ StepFunctionExecutionRole, Arn ]
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StepFunctionLogGroup.Arn
+      DefinitionString:  |-
+        {
+            "Comment": "Analytics-Step-Function",
+            "StartAt": "Initilize ETL Job Details",
+            "States": {
+                "Initilize ETL Job Details": {
+                    "Type": "Task",
+                    "Resource": "${InitGenericETLJobLF}",
+                    "Next": "ETL Job has been initialized successfully",
+                    "Catch": [
+                       {
+                            "ErrorEquals": [ "InvalidBucketException" ],
+                            "Next": "Job Initialization Failed"
+                       },
+                       {
+                            "ErrorEquals": [ "InvalidFolderException" ],
+                            "Next": "Job Initialization Failed"
+                       },
+                       {
+                            "ErrorEquals": [ "Exception" ],
+                            "Next": "Job Initialization Failed"
+                       }
+                     ]
+                },
+                "Job Initialization Failed": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "Job-Initialization-Failed",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "FAILED"
+                },
+                "ETL Job has been initialized successfully": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "ETL-Job-has-been-Initialized",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "Perform CSV to JSON"
+                },
+                "Perform CSV to JSON": {
+                    "Type" : "Task",
+                    "Resource" : "${CsvToJsonLF}",
+                    "Next": "CSV to JSON Completed Successfully",
+                    "Catch": [
+                       {
+                            "ErrorEquals": [ "CsvToJsonFailedException" ],
+                            "Next": "CSV to JSON Failed"
+                       }
+                     ]
+                },
+                "CSV to JSON Completed Successfully" : {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::sqs:sendMessage",
+                    "ResultPath": null,
+                    "Parameters": {
+                      "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                      "MessageGroupId": "CSV-to-JSON-Completed",
+                      "MessageBody.$": "$" 
+                    },
+                    "Next": "Invoke Analytics Crawler"
+                },
+                "CSV to JSON Failed" : {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::sqs:sendMessage",
+                    "ResultPath": null,
+                    "Parameters": {
+                      "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                      "MessageGroupId": "CSV-to-JSON-Failed",
+                      "MessageBody.$": "$" 
+                    },
+                    "Next": "FAILED"
+                },
+                "Invoke Analytics Crawler": {
+                    "Type" : "Task",
+                    "Resource" : "${InvokeAnalyticsCrawlerLF}",
+                    "TimeoutSeconds": 600,
+                    "Retry": [
+                      {
+                        "ErrorEquals": ["CrawlerRunningException"],
+                        "IntervalSeconds" : 5,
+                        "BackoffRate" : 5,
+                        "MaxAttempts" : 90
+                      }
+                    ],
+                    "Catch": [
+                       {
+                            "ErrorEquals": [ "Exception" ],
+                            "Next": "Analytics Crawler Failed"
+                       }
+                     ],
+                    "Next": "Analytics Crawler Started"
+                },
+                "Analytics Crawler Failed": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "Analytics-Crawler-Failed",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "FAILED"
+                },
+                "Analytics Crawler Started": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "Analytics-Crawler-Started",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "Wait for Analytics Crawler to Complete"
+                },
+                "Wait for Analytics Crawler to Complete": {
+                    "Type": "Wait",
+                    "Seconds": 90,
+                    "Next": "Check status of Analytics Crawler"
+                },
+                "Check status of Analytics Crawler": {
+                    "Type": "Task",
+                    "Resource": "${CheckStatusOfAnalyticsCrawlerLF}",
+                    "Retry": [
+                        {
+                          "ErrorEquals": [ "CrawlerException" ],
+                          "IntervalSeconds": 5,
+                          "BackoffRate": 5,
+                          "MaxAttempts": 90
+                        },
+                        {
+                          "ErrorEquals": [ "States.All" ],
+                          "IntervalSeconds": 5,
+                          "BackoffRate": 5,
+                          "MaxAttempts": 90
+                        }
+                      ],
+                    "Catch": [
+                        {
+                          "ErrorEquals": [ "CrawlerException" ],
+                          "Next": "Analytics Crawler Failed"
+                        },
+                        {
+                          "ErrorEquals": [ "States.ALL" ],
+                          "Next": "Analytics Crawler Failed"
+                        }
+                      ],
+                    "Next": "Analytics Crawler Completed Successfully"
+                },
+                "Analytics Crawler Completed Successfully": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "Analytics-Crawler-Completed",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "Initilize Raw ETL Job"
+                },
+                "Initilize Raw ETL Job": {
+                    "Type": "Pass",
+                    "Result": "1",
+                    "ResultPath": "$.order",
+                    "Next": "Invoke ETL Job"
+                },
+                "Invoke ETL Job": {
+                    "Type" : "Task",
+                    "Resource" : "${InvokeETLJobLF}",
+                    "TimeoutSeconds": 600,
+                    "Catch": [
+                       {
+                            "ErrorEquals": [ "States.ALL" ],
+                            "Next": "ETL Job Failed"
+                       }
+                     ],
+                    "Next": "ETL Job Started"
+                },
+                "ETL Job Started": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "ETL-Job-Started",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "Wait for ETL Job to Complete"
+                },
+                "Wait for ETL Job to Complete": {
+                    "Type": "Wait",
+                    "Seconds": 120,
+                    "Next": "Check Status of ETL Job"
+                },
+                "Check Status of ETL Job": {
+                    "Type": "Task",
+                    "Resource": "${CheckStatusOfETLJobLF}",
+                    "ResultPath" : "$.JobRunId",
+                    "Retry": [
+                        {
+                          "ErrorEquals": [ "ETLJobRunningException" ],
+                          "IntervalSeconds": 5,
+                          "BackoffRate": 5,
+                          "MaxAttempts": 90
+                        }
+                      ],
+                    "Catch": [
+                        {
+                          "ErrorEquals": [ "ETLJobFailedException" ],
+                          "Next": "ETL Job Failed"
+                        },
+                        {
+                          "ErrorEquals": [ "Exception" ],
+                          "Next": "ETL Job Failed"
+                        }
+                      ],
+                    "Next": "Need to Run another Job?"
+                },
+                "Need to Run another Job?": {
+                    "Type": "Choice",
+                    "Choices": [
+                        {
+                            "Variable": "$.order",
+                            "StringEquals": "1",
+                            "Next": "Initilize Confirm ETL Job"
+                        },
+                        {
+                            "Variable": "$.order",
+                            "StringEquals": "2",
+                            "Next": "ETL Jobs Completed"
+                        }
+                    ]
+                },
+                "ETL Job Failed": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "ETL-Job-Failed",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "FAILED"
+                },
+                "Initilize Confirm ETL Job": {
+                    "Type": "Pass",
+                    "Result": "2",
+                    "ResultPath": "$.order",
+                    "Next": "Invoke ETL Job"
+                },
+                "ETL Jobs Completed": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::sqs:sendMessage",
+                  "ResultPath": null,
+                  "Parameters": {
+                    "QueueUrl": "${StepFunctionLogETLEventsQueue}",
+                    "MessageGroupId": "ETL-Jobs-Completed",
+                    "MessageBody.$": "$" 
+                  },
+                  "Next": "SUCCESSFULL"
+                },
+                "FAILED": {
+                    "Type": "Fail"
+                },
+                "SUCCESSFULL": {
+                    "Type": "Succeed"
+                }
+
+            }
+        }
+      DefinitionSubstitutions:
+        InitGenericETLJobLF: !GetAtt InitGenericETLJobLF.Arn
+        InvokeAnalyticsCrawlerLF: !GetAtt InvokeAnalyticsCrawlerLF.Arn
+        CheckStatusOfAnalyticsCrawlerLF: !GetAtt CheckStatusOfAnalyticsCrawlerLF.Arn
+        InvokeETLJobLF: !GetAtt InvokeETLJobLF.Arn
+        CheckStatusOfETLJobLF: !GetAtt CheckStatusOfETLJobLF.Arn
+        LogETLEventsLF: !GetAtt LogETLEventsLF.Arn
+        StepFunctionLogETLEventsQueue: !Ref StepFunctionLogETLEventsQueue
+        CsvToJsonLF: !GetAtt CsvToJsonLF.Arn
+
+  StepFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                  - "logs:*"
+                  - "sqs:*"
+                  - "s3:*"
+                Resource: "*"
+  
+  AnalyticsSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: cloudMgrAnalytics
+
+  AnalyticsSNSSubscription:  
+    Type: AWS::SNS::Subscription
+    Properties: 
+      TopicArn: !Ref AnalyticsSNSTopic
+      Protocol: email
+      Endpoint: !Ref NotifyEmail
+  
+              
+
+  # AnalyticsStepFunctionCloudTrail: 
+  #   Type: AWS::CloudTrail::Trail
+  #   Properties: 
+  #     IsLogging: false      
+  #     EventSelectors: 
+  #       - DataResources: 
+  #           Type: AWS::S3::PutObject
+  #           Values:
+  #           - !Sub "arn:aws:s3:::${GlueAnalyticsCurrated}/"
+
+  # StepFunctionS3EventRuleRule: 
+  #   Type: AWS::Events::Rule
+  #   Properties: 
+  #     Description: "EventRule"
+  #     EventPattern: 
+  #       source: 
+  #         - "aws.s3"
+  #       detail-type: 
+  #         - "AWS API Call via CloudTrail"
+  #       detail: 
+  #         eventSource:
+  #         - s3.amazonaws.com
+  #         eventName:
+  #         - PutObject
+  #         requestParameters:
+  #           bucketName:
+  #           - !Ref GlueAnalyticsCurrated
+  #     State: "ENABLED"
+  #     Targets: 
+  #       -
+  #         Arn: "arn:aws:states:us-east-1:817952536107:stateMachine:Generic-Analytics-Step-Function"
+  #         Id:  "TargetStateMachineV1"
+        #- 
+        #  Arn: 
+        #    Fn::GetAtt: 
+        #      - "LambdaFunction"
+        #      - "Arn"
+        #  Id: "TargetFunctionV1"
+
+ 
+ 
+
