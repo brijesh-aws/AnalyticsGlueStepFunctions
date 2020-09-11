@@ -26,15 +26,15 @@ aws s3 cp etlcf-deploy.yaml s3://mytestbucket143/ --profile brijesh
 
 #### Run copyfiles.bat file to upload Glue ETL Job Scripts & Test CSV files.
 
-##### Run invokeStepFunction lambda to test Step Function. You can also call this Lambda based on S3 event when raw csv file will be uploaded.
+#### Run invokeStepFunction lambda to test Step Function. You can also call this Lambda based on S3 event when raw csv file will be uploaded.
 
 
-###### Notes:
+#### Notes:
 - When we run Clawler first time when it has only one file with single folder in currated bucket, it is not doing crawlering better way, instead it just creates single table with name 'json' only.
 - When we have multiple folders with files in currated bucket, then it is able to create tables with proper folder names.
 
 
-###### Future Enhancements:
+#### Future Enhancements:
 - Providing Job Configuration table and providing support of N ETL jobs instead of just row & confirm. (We can use Step Choice with Dynamic Input)
 - Providing support of Step Function Activity
 - Providing support of Glue Workflow
